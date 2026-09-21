@@ -1,0 +1,24 @@
+-- Add photos.user_id (P1-4: worker dashboard "My photos" is always empty).
+--
+-- Root cause: the remote schema HAS photos.user_id (nullable uuid, FK ->
+-- auth.users) but NO tracked migration ever created it — the column was
+-- bootstrapped out-of-band, so a fresh DB built from migrations lacks it.
+-- Meanwhile multiple places already reference the column:
+--
+--   * web/app/[locale]/dashboard/worker/page.tsx:113  filters
+--     `p.user_id === profile?.id` (permanently empty because uploads never
+--     wrote user_id AND migration-built DBs lack the column entirely)
+--   * web/app/api/schema-pins/route.ts:43              selects photos(user_id)
+--   * 20260725000008:28, 20260725000011:8, 20260725000013:78,86,
+--     20260725000014:117                              reference photos.user_id
+--     in policies/indexes (they only work because the remote pre-seeded it)
+--
+-- Fix: make the column a real, tracked part of the schema — identical DDL to
+-- the remote (nullable uuid, FK -> auth.users, no NOT NULL so existing rows
+-- and the FK constraint match exactly). The upload route now writes user_id
+-- on every insert, so the worker dashboard filter works going forward.
+--
+-- Idempotent: safe on the linked remote (already has the column) and on any
+-- migration-built DB (adds it).
+ALTER TABLE public.photos
+    ADD COLUMN IF NOT EXISTS user_id uuid REFERENCES auth.users (id);
