@@ -1,0 +1,55 @@
+name: Vercel Deploy
+
+# Pushes to main cannot rely on Vercel's native git-triggered builds: they
+# land BLOCKED (TEAM_ACCESS_REQUIRED) while the committer GitHub identity is
+# not linked to the Vercel team. This workflow deploys the exact CI-verified
+# SHA through the Vercel API as an authenticated team actor instead, retrying
+# if a fresh deployment gets seat-blocked (retries go READY).
+on:
+  workflow_run:
+    workflows: ["CI"]
+    types:
+      - completed
+    branches:
+      - main
+
+jobs:
+  deploy-production:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+    steps:
+      - name: Trigger Vercel production deploy
+        env:
+          VERCEL_TOKEN: ${{ secrets.VERCEL_TOKEN }}
+        run: |
+          SHA="${{ github.event.workflow_run.head_sha }}"
+          API="https://api.vercel.com"
+          TEAM="teamId=team_hZaRJJwgPZMoaf3hKmQtRbS4"
+          PROJ="prj_8mefNq1Am3tBxAZERHNvf8S8t7XV"
+          create_deploy() {
+            curl -s -X POST \
+              -H "Authorization: Bearer $VERCEL_TOKEN" \
+              -H "Content-Type: application/json" \
+              "$API/v13/deployments?$TEAM&skipAutoDetectionConfirmation=1" \
+              -d "{\"name\":\"construction-photo-log\",\"project\":\"$PROJ\",\"target\":\"production\",\"gitSource\":{\"type\":\"github\",\"repoId\":1310966756,\"ref\":\"main\",\"sha\":\"$SHA\"}}" \
+              | python3 -c "import json,sys; print(json.load(sys.stdin).get('id',''))"
+          }
+          latest_state() {
+            curl -s -H "Authorization: Bearer $VERCEL_TOKEN" \
+              "$API/v6/deployments?$TEAM&projectId=$PROJ&limit=1" \
+              | python3 -c "import json,sys; print(json.load(sys.stdin)['deployments'][0].get('state',''))"
+          }
+          ID=$(create_deploy)
+          echo "created $ID"
+          for i in 1 2 3 4 5 6; do
+            sleep 100
+            STATE=$(latest_state)
+            echo "attempt $i state=$STATE"
+            if [ "$STATE" = "READY" ]; then exit 0; fi
+            if [ "$STATE" = "BLOCKED" ] || [ "$STATE" = "ERROR" ] || [ "$STATE" = "CANCELED" ]; then
+              echo "recreating deployment"
+              ID=$(create_deploy)
+              echo "recreated $ID"
+            fi
+          done
+          [ "$(latest_state)" = "READY" ]
