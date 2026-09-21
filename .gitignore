@@ -1,0 +1,20 @@
+packages/**/__pycache__/
+packages/**/*.egg-info/
+packages/**/.pytest_cache/
+
+# ── Build / Cache ─────────────────────────────────────────────
+.next/
+.venv/
+.mypy_cache/
+.ruff_cache/
+
+# ── Environment / Secrets ──────────────────────────────────────
+.env*
+!.env.example
+!.env.local.example
+
+# ── Agent tooling state ────────────────────────────────────────
+.omo/
+
+# ── Unrelated project checked into workspace (not part of repo) ─
+web/wedding-planner/
