@@ -6,8 +6,52 @@ import { errorResponse, successResponse } from '@/lib/api/errors'
 import { validateBody } from '@/lib/api/validate'
 import { createCommentSchema, insertNotificationSchema } from '@/lib/api/schemas'
 import { requireProjectAccess } from '@/lib/api/company-auth'
+import type { CompanyContext } from '@/lib/api/company-auth'
 import { checkRateLimit, rateLimitResponse, getClientIp } from '@/lib/api/rate-limit'
 import { extractMentions } from '@/lib/mentions'
+import { monitoring } from '@/lib/monitoring'
+
+/**
+ * Comments are polymorphic: the URL carries a projectId, but the row that
+ * actually gets read/written is keyed by entity_type + entity_id. Resolve the
+ * entity's real project so authorization cannot be aimed at a different one.
+ */
+async function resolveEntityProject(
+  admin: ReturnType<typeof createAdminClient>,
+  entityType: string,
+  entityId: string,
+): Promise<string | null> {
+  const table = entityType === 'photo' ? 'photos' : entityType === 'defect' ? 'defects' : entityType === 'work_order' ? 'work_orders' : null
+  if (!table) return null
+
+  const { data } = await admin
+    .from(table)
+    .select('project_id')
+    .eq('id', entityId)
+    .maybeSingle()
+
+  return (data as { project_id: string } | null)?.project_id ?? null
+}
+
+/** A mention may only notify someone who can actually reach the project. */
+async function mentionableUserIds(
+  admin: ReturnType<typeof createAdminClient>,
+  candidates: string[],
+  projectId: string,
+  ctx: CompanyContext | null,
+): Promise<string[]> {
+  if (ctx?.isAdmin) return candidates
+  if (ctx) return candidates.filter((id) => ctx.companyUserIds.includes(id))
+
+  const { data: grants } = await admin
+    .from('user_permissions')
+    .select('user_id')
+    .in('user_id', candidates)
+    .eq('permission_key', `project.VIEW.${projectId}`)
+    .eq('granted', true)
+
+  return grants?.map((g) => g.user_id) ?? []
+}
 
 // GET /api/projects/[id]/comments?entityType=photo&entityId=xxx
 export async function GET(
@@ -29,11 +73,16 @@ export async function GET(
       return errorResponse('entityType и entityId се задолжителни')
     }
 
+    const entityProjectId = await resolveEntityProject(admin, entityType, entityId)
+    if (!entityProjectId || entityProjectId !== projectId) {
+      return errorResponse('Ентитетот не припаѓа на овој проект', 404)
+    }
+
     const { data: comments, error } = await admin
       .from('comments')
       .select(`
         *,
-        author:profiles!comments_user_id_fkey(id, full_name, avatar_url)
+        author:profiles!comments_user_id_profiles_fkey(id, full_name, avatar_url)
       `)
       .eq('entity_type', entityType)
       .eq('entity_id', entityId)
@@ -53,7 +102,7 @@ export async function GET(
             .from('comments')
             .select(`
               *,
-              author:profiles!comments_user_id_fkey(id, full_name, avatar_url)
+              author:profiles!comments_user_id_profiles_fkey(id, full_name, avatar_url)
             `)
             .in('parent_id', parentIds)
             .order('created_at', { ascending: true })
@@ -102,7 +151,7 @@ export async function POST(
 
     const { id: projectId } = await params
     const admin = createAdminClient()
-    await requireProjectAccess(admin, user.id, projectId)
+    const { ctx } = await requireProjectAccess(admin, user.id, projectId)
 
     const { data: parsed, error: validationError } = await validateBody(request, createCommentSchema)
     if (validationError) return validationError
@@ -114,6 +163,26 @@ export async function POST(
 
     if (!['photo', 'defect', 'work_order'].includes(entityType)) {
       return errorResponse('Невалиден entityType')
+    }
+
+    // Authorize against the entity's project, not the URL's: the insert below
+    // targets the body-supplied entity, and the admin client bypasses RLS.
+    const entityProjectId = await resolveEntityProject(admin, entityType, entityId)
+    if (!entityProjectId) return errorResponse('Ентитетот не постои', 404)
+    if (entityProjectId !== projectId) {
+      return errorResponse('Ентитетот не припаѓа на овој проект', 404)
+    }
+
+    // A reply must belong to the same entity, or threading crosses projects.
+    if (parentId) {
+      const { data: parent } = await admin
+        .from('comments')
+        .select('entity_type, entity_id')
+        .eq('id', parentId)
+        .maybeSingle()
+      if (!parent || parent.entity_type !== entityType || parent.entity_id !== entityId) {
+        return errorResponse('Невалиден parentId', 400)
+      }
     }
 
     // Insert comment
@@ -140,17 +209,23 @@ export async function POST(
         .select('id')
         .in('full_name', mentionNames)
 
-      if (profiles && profiles.length > 0) {
-        // Create mention records
-        const mentions = profiles.map((p) => ({
+      const reachable = profiles
+        ? await mentionableUserIds(admin, profiles.map((p) => p.id), projectId, ctx)
+        : []
+
+      if (reachable.length > 0) {
+        const targets = profiles!.filter((p) => reachable.includes(p.id))
+
+        const mentions = targets.map((p) => ({
           comment_id: comment.id,
           mentioned_user_id: p.id,
         }))
 
-        await admin.from('comment_mentions').insert(mentions)
+        const { error: mentionError } = await admin.from('comment_mentions').insert(mentions)
+        if (mentionError) monitoring.captureException(new Error(mentionError.message), { extra: { route: 'comments', action: 'insertMentions' } })
 
         // Create notifications for mentioned users
-        const notifications = profiles
+        const notifications = targets
           .filter((p) => p.id !== user.id) // Don't notify yourself
           .map((p) => ({
             user_id: p.id,
@@ -161,7 +236,10 @@ export async function POST(
         if (notifications.length > 0) {
           const parsedNotifications = z.array(insertNotificationSchema).safeParse(notifications)
           if (parsedNotifications.success) {
-            await admin.from('notifications').insert(parsedNotifications.data)
+            const { error: notificationError } = await admin.from('notifications').insert(parsedNotifications.data)
+            if (notificationError) monitoring.captureException(new Error(notificationError.message), { extra: { route: 'comments', action: 'insertNotifications' } })
+          } else {
+            monitoring.captureException(parsedNotifications.error, { extra: { route: 'comments', action: 'parseNotifications' } })
           }
         }
       }
@@ -182,7 +260,10 @@ export async function POST(
           comment_id: comment.id,
         })
         if (parsedNotification.success) {
-          await admin.from('notifications').insert(parsedNotification.data)
+          const { error: replyError } = await admin.from('notifications').insert(parsedNotification.data)
+          if (replyError) monitoring.captureException(new Error(replyError.message), { extra: { route: 'comments', action: 'insertReplyNotification' } })
+        } else {
+          monitoring.captureException(parsedNotification.error, { extra: { route: 'comments', action: 'parseReplyNotification' } })
         }
       }
     }

@@ -65,11 +65,17 @@ describe('checkRateLimit', () => {
     })
   })
 
-  it('extracts client IP properly from headers', () => {
+  it('takes the last x-forwarded-for hop so the key cannot be spoofed', () => {
+    // The attacker prepends a fake address; the proxy appends the real one.
     const reqWithForwarded = new NextRequest('http://localhost:3000/api/report', {
       headers: { 'x-forwarded-for': '203.0.113.195, 70.41.3.18' },
     })
-    expect(getClientIp(reqWithForwarded)).toBe('203.0.113.195')
+    expect(getClientIp(reqWithForwarded)).toBe('70.41.3.18')
+
+    const reqSingleHop = new NextRequest('http://localhost:3000/api/report', {
+      headers: { 'x-forwarded-for': '198.51.100.7' },
+    })
+    expect(getClientIp(reqSingleHop)).toBe('198.51.100.7')
 
     const reqWithRealIp = new NextRequest('http://localhost:3000/api/report', {
       headers: { 'x-real-ip': '198.51.100.1' },

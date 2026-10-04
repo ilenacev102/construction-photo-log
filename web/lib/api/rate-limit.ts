@@ -5,6 +5,10 @@ interface RateLimitRecord {
 }
 
 const rateLimitStore = new Map<string, RateLimitRecord>()
+// ponytail: in-process Map — resets on cold start, not shared across
+// instances (useless under Vercel scale-out). Upgrade to Upstash/Vercel KV
+// only if abuse actually survives deploys; authed routes key by user id, so
+// what is lost today is IP-keyed protection on the few unauthenticated GETs.
 
 // Periodically clean up stale entries (every 5 minutes)
 if (typeof setInterval !== 'undefined') {
@@ -86,11 +90,18 @@ export function checkRateLimit(
 
 /**
  * Extract client IP from NextRequest.
+ *
+ * Takes the LAST `x-forwarded-for` hop: the proxy closest to us appends the
+ * real client address, while everything before it comes from the request and
+ * is attacker-controlled — reading the first entry makes the rate-limit key
+ * trivially spoofable.
  */
 export function getClientIp(request: NextRequest): string {
   const forwarded = request.headers.get('x-forwarded-for')
   if (forwarded) {
-    return forwarded.split(',')[0].trim()
+    const hops = forwarded.split(',')
+    const trusted = hops[hops.length - 1]?.trim()
+    if (trusted) return trusted
   }
   const realIp = request.headers.get('x-real-ip')
   if (realIp) {

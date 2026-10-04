@@ -123,7 +123,10 @@ export async function GET(
     }
 
     const recomputed = computeManifestHash(freshHashes)
+    // An empty manifest verifies `every`/count comparisons vacuously — an
+    // attestable report must cover at least one photo.
     const manifestMatch =
+      photoIds.length > 0 &&
       results.every((r) => r.verdict !== 'mismatch') &&
       freshHashes.length === photoIds.filter((id) => byId.get(id)?.content_hash).length &&
       recomputed === manifest.manifest_hash

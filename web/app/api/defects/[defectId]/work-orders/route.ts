@@ -40,7 +40,9 @@ export async function GET(
       .in('id', woIds)
 
     if (woError) return errorResponse(woError.message, 500)
-    return successResponse(workOrders ?? [])
+
+    // Same re-scope as the sibling route: a link row is not proof of access.
+    return successResponse((workOrders ?? []).filter((w) => w.project_id === defect.project_id))
   } catch (err: unknown) {
     return apiErrorResponse(err)
   }

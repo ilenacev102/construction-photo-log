@@ -47,7 +47,10 @@ export async function GET(
       .in('id', defectIds)
 
     if (defectsError) return errorResponse(defectsError.message, 500)
-    return successResponse(defects ?? [])
+
+    // Re-scope: a link row is not proof of access — never return another
+    // project's defect even if one was linked before this check existed.
+    return successResponse((defects ?? []).filter((d) => d.project_id === wo.project_id))
   } catch (err: unknown) {
     return apiErrorResponse(err)
   }
@@ -90,11 +93,14 @@ export async function POST(
 
     const { data: defect, error: defectError } = await admin
       .from('defects')
-      .select('id')
+      .select('id, project_id')
       .eq('id', defectId)
       .single()
 
     if (defectError || !defect) return errorResponse('Defect not found', 404)
+
+    // The defect must live in the same project as the work order.
+    if (defect.project_id !== wo.project_id) return errorResponse('Defect not found', 404)
 
     const { error: insertError } = await admin
       .from('work_order_defects')

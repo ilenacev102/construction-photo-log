@@ -34,7 +34,7 @@ export async function GET(request: NextRequest) {
           entity_type,
           entity_id,
           project_id,
-          author:profiles!comments_user_id_fkey(full_name)
+          author:profiles!comments_user_id_profiles_fkey(full_name)
         )
       `)
       .eq('user_id', user.id)

@@ -123,6 +123,9 @@ export const inviteActionSchema = z.object({
   ),
   projectId: z.string().uuid('Invalid project ID').optional(),
   targetUserId: z.string().uuid('Invalid user ID').optional(),
+  // Directory search for getAvailableUsers — never a bulk dump of other
+  // tenants' users (min length keeps `%`-style probing from becoming a scan).
+  query: z.string().trim().min(3, 'Внесете барем 3 знаци').max(80).optional(),
 })
 
 // ── Labels ────────────────────────────────────────────────────────────────────
