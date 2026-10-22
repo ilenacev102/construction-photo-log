@@ -6,6 +6,7 @@ import { errorResponse, successResponse, forbiddenResponse } from '@/lib/api/err
 import { validateBody } from '@/lib/api/validate'
 import { createProjectSchema } from '@/lib/api/schemas'
 import { getCompanyContext, isAdminUser } from '@/lib/api/company-auth'
+import { monitoring } from '@/lib/monitoring'
 
 export async function GET() {
   try {
@@ -42,11 +43,19 @@ export async function GET() {
       .filter(Boolean) ?? []
 
     if (crossProjectIds.length > 0) {
-      const { data: crossProjects } = await admin
+      const { data: crossProjects, error: crossError } = await admin
         .from('projects')
-        .select('id, name, address, client_name, user_id, company_name, trade, timezone, created_at')
+        .select('id, name, address, client_name, user_id, trade, timezone, created_at')
         .in('id', crossProjectIds)
         .order('created_at', { ascending: false })
+      // Never swallow this: a failed cross-company query used to look identical
+      // to "no invitations", silently emptying an invited user's project list.
+      if (crossError) {
+        monitoring.captureException(new Error(crossError.message), {
+          extra: { route: 'projects', action: 'crossCompanyProjects', userId: user.id },
+        })
+        return errorResponse(crossError.message, 500)
+      }
       const existingIds = new Set(data?.map(p => p.id) ?? [])
       const merged = [...(data ?? [])]
       for (const cp of crossProjects ?? []) {
