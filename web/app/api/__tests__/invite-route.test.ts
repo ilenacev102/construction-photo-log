@@ -10,49 +10,64 @@ import { POST } from '@/app/api/invite/route'
  * surviving authorization rules: role gating and the cross-company
  * restriction, plus that the grant upsert still runs.
  */
-const { INVITER_ID, PROJECT_ID, TARGET_ID, OWNER_ID, dbHandlers, makeDb, ok } = vi.hoisted(() => {
-  type RowResult = { data: unknown; error: unknown }
+const { INVITER_ID, PROJECT_ID, TARGET_ID, OWNER_ID, dbHandlers, makeDb, ok, ilikeCalls, limitCalls } =
+  vi.hoisted(() => {
+    type RowResult = { data: unknown; error: unknown }
 
-  const INVITER_ID = 'inviter-1'
-  const PROJECT_ID = '11111111-1111-4111-8111-111111111111'
-  const TARGET_ID = '22222222-2222-4222-8222-222222222222'
-  const OWNER_ID = 'owner-1'
+    const INVITER_ID = 'inviter-1'
+    const PROJECT_ID = '11111111-1111-4111-8111-111111111111'
+    const TARGET_ID = '22222222-2222-4222-8222-222222222222'
+    const OWNER_ID = 'owner-1'
 
-  const dbHandlers: Record<string, () => RowResult> = {}
-  const call = (key: string) => dbHandlers[key]?.() ?? { data: null, error: null }
+    const dbHandlers: Record<string, () => RowResult> = {}
+    const call = (key: string) => dbHandlers[key]?.() ?? { data: null, error: null }
 
-  /**
-   * Minimal fluent mock of the Supabase query builder used by the invite
-   * route. Every chained call returns the same thenable chain; the terminal
-   * decides the handler key:
-   *   .single() -> `${table}.single[:<eq id>]`  (eq('id', x) disambiguates
-   *                the three profiles.single calls: inviter / owner / target)
-   */
-  const makeDb = () => {
-    const db = {
-      from: (_table: string) => {
-        let eqId: string | null = null
-        const chain = {
-          select: () => chain,
-          eq: (col: string, val: unknown) => {
-            if (col === 'id') eqId = String(val)
-            return chain
-          },
-          in: () => chain,
-          upsert: () => chain,
-          single: () => call(`${_table}.single${eqId ? `:${eqId}` : ''}`),
-          maybeSingle: () => call(`${_table}.maybeSingle`),
-          then: (resolve: (v: RowResult) => void) => resolve(call(`${_table}.chain`)),
-        }
-        return chain
-      },
+    // Captured so tests can assert the directory search is escaped + capped.
+    const ilikeCalls: string[] = []
+    const limitCalls: number[] = []
+
+    /**
+     * Minimal fluent mock of the Supabase query builder used by the invite
+     * route. Every chained call returns the same thenable chain; the terminal
+     * decides the handler key:
+     *   .single() -> `${table}.single[:<eq id>]`  (eq('id', x) disambiguates
+     *                the three profiles.single calls: inviter / owner / target)
+     */
+    const makeDb = () => {
+      const db = {
+        from: (_table: string) => {
+          let eqId: string | null = null
+          const chain = {
+            select: () => chain,
+            eq: (col: string, val: unknown) => {
+              if (col === 'id') eqId = String(val)
+              return chain
+            },
+            not: () => chain,
+            in: () => chain,
+            upsert: () => chain,
+            ilike: (col: string, val: unknown) => {
+              if (col === 'full_name') ilikeCalls.push(String(val))
+              return chain
+            },
+            order: () => chain,
+            limit: (n: number) => {
+              limitCalls.push(n)
+              return chain
+            },
+            single: () => call(`${_table}.single${eqId ? `:${eqId}` : ''}`),
+            maybeSingle: () => call(`${_table}.maybeSingle`),
+            then: (resolve: (v: RowResult) => void) => resolve(call(`${_table}.chain`)),
+          }
+          return chain
+        },
+      }
+      return db
     }
-    return db
-  }
 
-  const ok = (data: unknown): RowResult => ({ data, error: null })
-  return { INVITER_ID, PROJECT_ID, TARGET_ID, OWNER_ID, dbHandlers, makeDb, ok }
-})
+    const ok = (data: unknown): RowResult => ({ data, error: null })
+    return { INVITER_ID, PROJECT_ID, TARGET_ID, OWNER_ID, dbHandlers, makeDb, ok, ilikeCalls, limitCalls }
+  })
 
 vi.mock('@supabase/ssr', () => ({
   createServerClient: vi.fn(() => ({
@@ -84,6 +99,24 @@ function inviteRequest(projectId: string, targetUserId: string): NextRequest {
   })
 }
 
+function searchRequest(projectId: string, query: string | undefined): NextRequest {
+  return new NextRequest('http://localhost/api/invite', {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ action: 'getAvailableUsers', projectId, query }),
+  })
+}
+
+function seedDirectorySearch(): void {
+  dbHandlers[`profiles.single:${INVITER_ID}`] = () =>
+    ok({ company_name: 'Acme', role: 'site_manager' })
+  dbHandlers[`projects.single:${PROJECT_ID}`] = () => ok({ user_id: OWNER_ID })
+  dbHandlers[`profiles.single:${OWNER_ID}`] = () => ok({ company_name: 'Acme' })
+  dbHandlers['user_permissions.chain'] = () => ok([])
+  dbHandlers['profiles.chain'] = () =>
+    ok([{ id: 'candidate-1', full_name: 'Bob Builder', company_name: 'Rival', role: 'foreman' }])
+}
+
 function seedHappyPath(inviterRole: string): void {
   dbHandlers[`profiles.single:${INVITER_ID}`] = () =>
     ok({ company_name: 'Acme', role: inviterRole })
@@ -102,6 +135,8 @@ function seedHappyPath(inviterRole: string): void {
 describe('POST /api/invite inviteUser', () => {
   beforeEach(() => {
     for (const key of Object.keys(dbHandlers)) delete dbHandlers[key]
+    ilikeCalls.length = 0
+    limitCalls.length = 0
   })
 
   it('grants cross-company access with no seat limit (upsert runs, 200)', async () => {
@@ -135,5 +170,39 @@ describe('POST /api/invite inviteUser', () => {
     const res = await POST(inviteRequest(PROJECT_ID, TARGET_ID))
 
     expect(res.status).toBe(403)
+  })
+})
+
+describe('POST /api/invite getAvailableUsers (P1-13: no cross-tenant directory dump)', () => {
+  beforeEach(() => {
+    for (const key of Object.keys(dbHandlers)) delete dbHandlers[key]
+    ilikeCalls.length = 0
+    limitCalls.length = 0
+  })
+
+  it('refuses to list users without a name fragment', async () => {
+    seedDirectorySearch()
+
+    const noQuery = await POST(searchRequest(PROJECT_ID, undefined))
+    const tooShort = await POST(searchRequest(PROJECT_ID, 'bo'))
+
+    expect(noQuery.status).toBe(400)
+    expect(tooShort.status).toBe(400)
+    expect(ilikeCalls).toEqual([])
+  })
+
+  it('escapes LIKE wildcards in the query and caps the page', async () => {
+    seedDirectorySearch()
+
+    // `%` and `_` unescaped would turn this into a match-everything scan.
+    const res = await POST(searchRequest(PROJECT_ID, '100%_'))
+
+    expect(res.status).toBe(200)
+    expect(ilikeCalls.at(-1)).toBe('%100\\%\\_%')
+    expect(limitCalls.at(-1)).toBe(20)
+
+    const body = await res.json()
+    expect(body.data).toHaveLength(1)
+    expect(body.data[0].full_name).toBe('Bob Builder')
   })
 })

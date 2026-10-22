@@ -10,7 +10,10 @@ import {
   getCompanyContext,
   isAdminUser,
   requireProjectAccess,
+  requireProjectManager,
   requireProjectMutate,
+  requireProjectRole,
+  DEFECT_WRITE_ROLES,
 } from '@/lib/api/company-auth'
 
 const DEFECT_COLUMNS = 'id, project_id, created_by, assigned_to, title, description, severity, status, location, photo_ids, due_date, resolved_at, resolution_notes, created_at, updated_at'
@@ -103,7 +106,7 @@ export async function POST(request: NextRequest) {
     if (validationError) return validationError
     const { project_id, title, description, severity, assigned_to, location, photo_ids } = body!
 
-    await requireProjectMutate(admin, user.id, project_id)
+    await requireProjectRole(admin, user.id, project_id, DEFECT_WRITE_ROLES)
 
     const { data, error } = await admin
       .from('defects')
@@ -135,11 +138,18 @@ export async function PATCH(request: NextRequest) {
 
     const { data: defect } = await admin
       .from('defects')
-      .select('project_id')
+      .select('project_id, created_by, assigned_to')
       .eq('id', id)
       .single()
     if (!defect) return errorResponse('Defect not found', 404)
-    await requireProjectMutate(admin, user.id, defect.project_id)
+
+    // RLS lets the assignee/creator update their own defect whatever their
+    // role; everyone else needs manager rights (20260731000001).
+    if (defect.assigned_to === user.id || defect.created_by === user.id) {
+      await requireProjectMutate(admin, user.id, defect.project_id)
+    } else {
+      await requireProjectManager(admin, user.id, defect.project_id)
+    }
 
     const updates: Record<string, unknown> = { status }
     if (status === 'resolved' || status === 'closed') {
@@ -181,7 +191,7 @@ export async function DELETE(request: NextRequest) {
       .eq('id', id)
       .single()
     if (!defect) return errorResponse('Defect not found', 404)
-    await requireProjectMutate(admin, user.id, defect.project_id)
+    await requireProjectManager(admin, user.id, defect.project_id)
 
     const { error } = await admin.from('defects').delete().eq('id', id)
     if (error) return errorResponse(error.message, 500)

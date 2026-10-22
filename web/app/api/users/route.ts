@@ -133,7 +133,7 @@ export async function PATCH(request: NextRequest) {
 
     const { data: targetProfile } = await admin
       .from('profiles')
-      .select('role, company_name, email')
+      .select('role, company_name')
       .eq('id', userId)
       .single()
 
@@ -175,7 +175,6 @@ export async function PATCH(request: NextRequest) {
         previous_role: targetProfile.role,
         new_role: role,
         target_company: targetProfile.company_name,
-        target_email: targetProfile.email,
       },
     })
 

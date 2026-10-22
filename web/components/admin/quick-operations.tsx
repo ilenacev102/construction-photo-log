@@ -1,21 +1,24 @@
 'use client'
 
 import { useTranslations } from 'next-intl'
-import { CreditCard, ScrollText, Tag, Users, UsersRound, type LucideIcon } from 'lucide-react'
+import { ScrollText, Tag, Users, UsersRound, type LucideIcon } from 'lucide-react'
 
 import { cn } from '@/lib/utils'
 import { Link } from '@/i18n/navigation'
 import { buttonVariants } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 
-type OperationKey = 'users' | 'team' | 'auditLog' | 'labels' | 'billing'
+// Every href here MUST resolve to a real page under app/[locale] — the
+// rendered-link invariant test in ./__tests__/quick-operations.test.tsx
+// fails the build otherwise. There was a /admin/billing tile with no page
+// behind it for months (P1-21); billing needs a payment provider first.
+type OperationKey = 'users' | 'team' | 'auditLog' | 'labels'
 
 const QUICK_OPERATIONS: Array<{ key: OperationKey; href: string; icon: LucideIcon }> = [
   { key: 'users', href: '/admin/users', icon: Users },
   { key: 'team', href: '/admin/team', icon: UsersRound },
   { key: 'auditLog', href: '/admin/audit', icon: ScrollText },
   { key: 'labels', href: '/admin/labels', icon: Tag },
-  { key: 'billing', href: '/admin/billing', icon: CreditCard },
 ]
 
 function QuickOperations() {

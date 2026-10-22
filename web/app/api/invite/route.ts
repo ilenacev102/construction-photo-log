@@ -91,9 +91,15 @@ export async function POST(request: NextRequest) {
 
     switch (action) {
       case 'getAvailableUsers': {
-        // List users from OTHER companies that can be invited to a project
+        // Search-then-invite, never a directory dump: listing every other
+        // tenant's users (unbounded, with company/email) is a cross-tenant
+        // PII leak (P1-13). Require a name fragment, cap the page.
         const projectId = body.projectId as string | undefined
+        const query = (body.query as string | undefined)?.trim()
         if (!projectId) return errorResponse('Missing projectId')
+        if (!query || query.length < 3) {
+          return errorResponse('Внесете барем 3 знаци за пребарување', 400)
+        }
 
         const denied = await assertProjectInviteAccess(projectId)
         if (denied) return denied
@@ -124,12 +130,18 @@ export async function POST(request: NextRequest) {
 
         const invitedIds = new Set(existingInvites?.map(i => i.user_id) ?? [])
 
+        // Escape LIKE metacharacters — an unescaped `%` in `query` would
+        // turn the search back into a full directory listing.
+        const pattern = `%${query.replace(/[\\%_]/g, (c) => `\\${c}`)}%`
+
         const { data: availableUsers } = await admin
           .from('profiles')
-          .select('id, full_name, email, company_name, role')
+          .select('id, full_name, company_name, role')
           .not('company_name', 'eq', projectCompany)
           .not('role', 'eq', 'admin')
+          .ilike('full_name', pattern)
           .order('full_name', { ascending: true })
+          .limit(20)
 
         const filtered = (availableUsers ?? []).filter(p => !invitedIds.has(p.id))
 
@@ -220,7 +232,7 @@ export async function POST(request: NextRequest) {
 
         const { data: profiles } = await admin
           .from('profiles')
-          .select('id, full_name, email, company_name')
+          .select('id, full_name, company_name')
           .in('id', userIds)
 
         const profileMap = new Map((profiles ?? []).map(p => [p.id, p]))

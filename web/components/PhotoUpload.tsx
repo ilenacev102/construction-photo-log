@@ -12,13 +12,15 @@ import { monitoring } from '@/lib/monitoring'
 import { getOutboxStore } from '@/lib/offline/store'
 import { isOnline } from '@/lib/offline/sync'
 import { useOutboxSync } from '@/hooks/useOutboxSync'
+import { planRetry, retainAfterBatch } from '@/components/photo-batch'
+import type { BatchStatus } from '@/components/photo-batch'
 
 interface PhotoUploadProps {
   projectId: string
   onSuccess: () => void
 }
 
-type ItemStatus = 'pending' | 'uploading' | 'done' | 'queued' | 'error'
+type ItemStatus = BatchStatus
 
 interface BatchItem {
   id: number
@@ -26,6 +28,8 @@ interface BatchItem {
   previewUrl: string
   status: ItemStatus
   error: string | null
+  photoId?: string | null
+  taggedLabelIds?: string[]
 }
 
 export default function PhotoUpload({ projectId, onSuccess }: PhotoUploadProps) {
@@ -60,6 +64,11 @@ export default function PhotoUpload({ projectId, onSuccess }: PhotoUploadProps) 
     liveUrls.current.clear()
   }
 
+  function revokeUrl(url: string) {
+    URL.revokeObjectURL(url)
+    liveUrls.current.delete(url)
+  }
+
   function handleFilesSelect(e: React.ChangeEvent<HTMLInputElement>) {
     const files = Array.from(e.target.files ?? [])
     if (files.length === 0) return
@@ -90,11 +99,10 @@ export default function PhotoUpload({ projectId, onSuccess }: PhotoUploadProps) 
     })
   }
 
-  async function uploadOne(
+  async function storePhoto(
     item: BatchItem,
     sharedNote: string,
-    sharedLabels: Label[],
-  ): Promise<'done' | 'queued'> {
+  ): Promise<{ photoId: string } | { queued: true }> {
     const exif = await extractExif(item.file)
 
     if (!isOnline()) {
@@ -108,7 +116,7 @@ export default function PhotoUpload({ projectId, onSuccess }: PhotoUploadProps) 
         latitude: exif.latitude,
         longitude: exif.longitude,
       })
-      return 'queued'
+      return { queued: true }
     }
 
     const formData = new FormData()
@@ -134,7 +142,7 @@ export default function PhotoUpload({ projectId, onSuccess }: PhotoUploadProps) 
           latitude: exif.latitude,
           longitude: exif.longitude,
         })
-        return 'queued'
+        return { queued: true }
       }
       throw err
     }
@@ -151,15 +159,21 @@ export default function PhotoUpload({ projectId, onSuccess }: PhotoUploadProps) 
     }
 
     const { data } = await res.json()
-    const photoId = data.photoId
+    return { photoId: data.photoId }
+  }
 
-    const taggingResults = await Promise.allSettled(
-      sharedLabels.map(async (label) => {
+  /** Applies labels to an already-stored photo; returns the ids that succeeded. */
+  async function applyTaggings(
+    photoId: string,
+    labelIds: string[],
+  ): Promise<{ applied: string[]; failed: number }> {
+    const results = await Promise.allSettled(
+      labelIds.map(async (labelId) => {
         const tagRes = await fetch('/api/taggings', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({
-            label_id: label.id,
+            label_id: labelId,
             taggable_type: 'photo',
             taggable_id: photoId,
           }),
@@ -168,15 +182,8 @@ export default function PhotoUpload({ projectId, onSuccess }: PhotoUploadProps) 
         return tagRes.json()
       }),
     )
-    const failedTaggings = taggingResults.filter((r) => r.status === 'rejected')
-    if (failedTaggings.length > 0) {
-      monitoring.captureException(
-        new Error(`${failedTaggings.length} taggings failed for photo ${photoId}`),
-        { extra: { component: 'PhotoUpload', projectId } },
-      )
-      throw new Error(t('tagsPartialFail'))
-    }
-    return 'done'
+    const applied = labelIds.filter((_, i) => results[i].status === 'fulfilled')
+    return { applied, failed: labelIds.length - applied.length }
   }
 
   async function handleUpload() {
@@ -185,27 +192,55 @@ export default function PhotoUpload({ projectId, onSuccess }: PhotoUploadProps) 
 
     const sharedNote = note
     const sharedLabels = selectedLabels
+    const labelIds = sharedLabels.map((l) => l.id)
     setUploading(true)
+
+    // Mirror of the rendered list, so retention decisions see this run's results.
+    const latest = new Map(items.map((i) => [i.id, i]))
+    function patchItem(id: number, changes: Partial<BatchItem>) {
+      const current = latest.get(id)
+      if (!current) return
+      const next = { ...current, ...changes }
+      latest.set(id, next)
+      setItems((prev) => prev.map((p) => (p.id === id ? next : p)))
+    }
 
     let doneCount = 0
     for (const item of batch) {
-      setItems((prev) =>
-        prev.map((p) => (p.id === item.id ? { ...p, status: 'uploading', error: null } : p)),
-      )
+      patchItem(item.id, { status: 'uploading', error: null })
       try {
-        const outcome = await uploadOne(item, sharedNote, sharedLabels)
-        setItems((prev) =>
-          prev.map((p) => (p.id === item.id ? { ...p, status: outcome } : p)),
-        )
-        if (outcome === 'done') doneCount += 1
+        const plan = planRetry(item, labelIds)
+        let photoId = item.photoId ?? null
+        if (plan.upload) {
+          const stored = await storePhoto(item, sharedNote)
+          if ('queued' in stored) {
+            patchItem(item.id, { status: 'queued' })
+            continue
+          }
+          photoId = stored.photoId
+          patchItem(item.id, { photoId })
+        }
+        if (!photoId) throw new Error(t('errorUpload'))
+
+        const { applied, failed } = await applyTaggings(photoId, plan.labelIds)
+        patchItem(item.id, {
+          taggedLabelIds: [...(item.taggedLabelIds ?? []), ...applied],
+        })
+        if (failed > 0) {
+          monitoring.captureException(
+            new Error(`${failed} taggings failed for photo ${photoId}`),
+            { extra: { component: 'PhotoUpload', projectId } },
+          )
+          throw new Error(t('tagsPartialFail'))
+        }
+
+        patchItem(item.id, { status: 'done' })
+        doneCount += 1
       } catch (err) {
-        setItems((prev) =>
-          prev.map((p) =>
-            p.id === item.id
-              ? { ...p, status: 'error', error: err instanceof Error ? err.message : t('errorUpload') }
-              : p,
-          ),
-        )
+        patchItem(item.id, {
+          status: 'error',
+          error: err instanceof Error ? err.message : t('errorUpload'),
+        })
         monitoring.captureException(err, { extra: { component: 'PhotoUpload', projectId } })
       }
     }
@@ -213,10 +248,17 @@ export default function PhotoUpload({ projectId, onSuccess }: PhotoUploadProps) 
     setUploading(false)
     refreshQueue()
     if (doneCount > 0) {
-      revokeAll()
-      setItems([])
-      setNote('')
-      setSelectedLabels([])
+      // Keep failures + unfinished items so nothing the worker shot is lost.
+      const kept = retainAfterBatch([...latest.values()])
+      const keptIds = new Set(kept.map((i) => i.id))
+      latest.forEach((i) => {
+        if (!keptIds.has(i.id)) revokeUrl(i.previewUrl)
+      })
+      setItems(kept)
+      if (kept.length === 0) {
+        setNote('')
+        setSelectedLabels([])
+      }
       if (fileInputRef.current) fileInputRef.current.value = ''
       onSuccess()
     }

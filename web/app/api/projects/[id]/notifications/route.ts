@@ -28,7 +28,7 @@ export async function GET(
           body,
           entity_type,
           entity_id,
-          author:profiles!comments_user_id_fkey(full_name)
+          author:profiles!comments_user_id_profiles_fkey(full_name)
         )
       `)
       .eq('user_id', user.id)

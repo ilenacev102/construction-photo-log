@@ -3,7 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin'
 import { requireAuth, apiErrorResponse } from '@/lib/api/auth-guard'
 import { checkRateLimit, rateLimitResponse, getClientIp } from '@/lib/api/rate-limit'
 import { errorResponse, successResponse } from '@/lib/api/errors'
-import { requireProjectAccess, requireProjectMutate } from '@/lib/api/company-auth'
+import { requireProjectAccess, requireProjectManager } from '@/lib/api/company-auth'
 
 export async function GET(request: NextRequest, { params }: { params: Promise<{ id: string }> }) {
   try {
@@ -15,7 +15,7 @@ export async function GET(request: NextRequest, { params }: { params: Promise<{ 
 
     const { data, error } = await admin
       .from('projects')
-      .select('id, name, address, client_name, user_id, company_name, trade, timezone, created_at')
+      .select('id, name, address, client_name, user_id, trade, timezone, created_at')
       .eq('id', id)
       .single()
     if (error) return errorResponse(error.message, 500)
@@ -36,7 +36,9 @@ export async function DELETE(request: NextRequest, { params }: { params: Promise
 
     const { id } = await params
     const admin = createAdminClient()
-    await requireProjectMutate(admin, user.id, id)
+    // Creation requires site_manager/admin (app/api/projects/route.ts) —
+    // destruction must not be easier than creation.
+    await requireProjectManager(admin, user.id, id)
 
     const { error } = await admin.from('projects').delete().eq('id', id)
     if (error) return errorResponse(error.message, 500)

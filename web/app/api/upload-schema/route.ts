@@ -10,7 +10,17 @@ import { uploadSchemaSchema, validateFormData } from '@/lib/validation/schemas'
 import { monitoring } from '@/lib/monitoring'
 
 const MAX_FILE_SIZE = 20 * 1024 * 1024 // 20 MB
-const ALLOWED_MIME_TYPES = ['image/jpeg', 'image/png', 'image/webp', 'image/heic', 'image/heif', 'application/pdf']
+// Extension is derived from the (already validated) MIME type, never from
+// `file.name` — a raw client filename would let the storage key end in an
+// arbitrary suffix. Key doubles as the allowlist.
+const EXT_BY_MIME: Record<string, string> = {
+  'image/jpeg': 'jpg',
+  'image/png': 'png',
+  'image/webp': 'webp',
+  'image/heic': 'heic',
+  'image/heif': 'heif',
+  'application/pdf': 'pdf',
+}
 
 export async function POST(request: NextRequest) {
   try {
@@ -30,11 +40,12 @@ export async function POST(request: NextRequest) {
     if (!file) {
       return errorResponse('Missing file')
     }
+    const fileExt = EXT_BY_MIME[file.type]
+    if (!fileExt) {
+      return errorResponse(`Invalid file type: ${file.type}`)
+    }
     if (file.size > MAX_FILE_SIZE) {
       return errorResponse('File too large (max 20 MB)')
-    }
-    if (!ALLOWED_MIME_TYPES.includes(file.type)) {
-      return errorResponse(`Invalid file type: ${file.type}`)
     }
 
     // Validate form fields with Zod
@@ -67,7 +78,6 @@ export async function POST(request: NextRequest) {
       }
     )
 
-    const fileExt = file.name.split('.').pop() ?? 'png'
     const fileName = `schemas/${projectId}/${Date.now()}.${fileExt}`
 
     const { error: uploadError } = await authClient.storage

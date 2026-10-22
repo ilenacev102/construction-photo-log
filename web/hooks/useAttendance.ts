@@ -38,13 +38,13 @@ export function useAttendance(projectId: string, tz: string = DEFAULT_TZ) {
     let ignore = false
     const run = async () => {
       const result = await loadTodayLog(projectId, tz)
-      if (!result.hasUser) return
-      if (!ignore) {
-        if (result.data) {
-          setTodayLog(result.data)
-        }
-        setIsLoading(false)
+      if (ignore) return
+      if (result.data) {
+        setTodayLog(result.data)
       }
+      // Anonymous visitors must leave the loading state too — the page shows
+      // its own "not authenticated" card from `hasUser: false`.
+      setIsLoading(false)
     }
     void run()
     return () => { ignore = true }

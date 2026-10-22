@@ -50,6 +50,20 @@ export async function PATCH(
       return errorResponse('action must be "add" or "remove"')
     }
 
+    // photo_ids is a bare uuid[] with no FK — a foreign photo id would be
+    // accepted silently, so resolve the photo's project first.
+    if (action === 'add') {
+      const { data: photo } = await admin
+        .from('photos')
+        .select('project_id')
+        .eq('id', photoId)
+        .maybeSingle()
+
+      if (!photo || photo.project_id !== defect.project_id) {
+        return errorResponse('Сликата не припаѓа на овој проект', 404)
+      }
+    }
+
     const currentIds: string[] = defect.photo_ids ?? []
     let updatedIds: string[]
 
