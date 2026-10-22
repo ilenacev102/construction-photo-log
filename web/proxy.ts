@@ -133,7 +133,7 @@ export async function proxy(request: NextRequest) {
   if (!isAuthenticated && !isPublicAppRoute) {
     const loginUrl = request.nextUrl.clone()
     loginUrl.pathname = '/login'
-    loginUrl.searchParams.set('redirect', pathname)
+    loginUrl.searchParams.set('next', pathname)
     const redirectResponse = NextResponse.redirect(loginUrl)
     // Propagate refreshed session cookies onto the redirect — otherwise a
     // token refreshed during this request is lost and the next request
