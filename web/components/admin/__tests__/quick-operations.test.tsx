@@ -1,3 +1,6 @@
+import { existsSync } from 'node:fs'
+import { join } from 'node:path'
+
 import { render, screen } from '@testing-library/react'
 import { NextIntlClientProvider } from 'next-intl'
 import type { AnchorHTMLAttributes, ReactElement } from 'react'
@@ -22,7 +25,7 @@ function renderWithIntl(ui: ReactElement) {
 }
 
 describe('QuickOperations', () => {
-  it('renders the title and all five operation links with the correct hrefs and labels', () => {
+  it('renders the title and every operation link points at a real admin page', () => {
     renderWithIntl(<QuickOperations />)
 
     expect(
@@ -34,12 +37,29 @@ describe('QuickOperations', () => {
       { name: 'Team', href: '/admin/team' },
       { name: 'Audit log', href: '/admin/audit' },
       { name: 'Labels', href: '/admin/labels' },
-      { name: 'Billing & plan', href: '/admin/billing' },
     ]
 
     for (const { name, href } of expected) {
       const link = screen.getByRole('link', { name })
       expect(link).toHaveAttribute('href', href)
+    }
+
+    // Regression guard for P1-21: /admin/billing was linked from here with no
+    // page behind it, and this test locked the bug in by asserting the href.
+    // vitest runs with web/ as the working directory; import.meta.url is not a
+    // file: URL under jsdom, so fileURLToPath() throws there.
+    const webRoot = process.cwd()
+    const rendered = screen
+      .getAllByRole('link')
+      .map((el) => el.getAttribute('href') ?? '')
+      .filter((href) => href.startsWith('/'))
+
+    expect(rendered.length).toBeGreaterThan(0)
+    for (const href of rendered) {
+      const page = href === '/admin' ? 'admin/page.tsx' : `${href.replace(/^\//, '')}/page.tsx`
+      expect(existsSync(join(webRoot, 'app/[locale]', page)), `${href} has no page.tsx`).toBe(
+        true,
+      )
     }
   })
 })
