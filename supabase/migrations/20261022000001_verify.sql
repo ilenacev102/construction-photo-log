@@ -144,3 +144,22 @@ where n.nspname = 'public'
     'user_has_permission'
   )
 order by p.proname;
+
+-- ─────────────────────────────────────────────────────────────────────────────
+-- 5. Triggers that call the three hardened functions. A non-internal trigger
+--    invoking seed_default_labels/get_user_permissions/user_has_permission runs
+--    without auth.uid() and will now be denied unless its session is
+--    service_role — check this list before deploying.
+-- ─────────────────────────────────────────────────────────────────────────────
+
+select
+  t.tgname,
+  t.tgrelid::regclass as on_table,
+  p.proname           as calls
+from pg_trigger t
+join pg_proc p on p.oid = t.tgfoid
+join pg_namespace n on n.oid = p.pronamespace
+where not t.tgisinternal
+  and n.nspname = 'public'
+  and p.proname in ('seed_default_labels', 'get_user_permissions', 'user_has_permission')
+order by on_table, t.tgname;
