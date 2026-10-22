@@ -232,7 +232,7 @@ export async function POST(request: NextRequest) {
 
         const { data: profiles } = await admin
           .from('profiles')
-          .select('id, full_name, email, company_name')
+          .select('id, full_name, company_name')
           .in('id', userIds)
 
         const profileMap = new Map((profiles ?? []).map(p => [p.id, p]))
