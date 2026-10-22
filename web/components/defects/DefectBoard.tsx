@@ -9,6 +9,7 @@ import { Button } from '@/components/ui/button'
 import { useDefects } from '@/hooks/useDefects'
 import { useRole } from '@/hooks/useRole'
 import type { Defect, DefectStatus, DefectSeverity, Photo, WorkOrder } from '@/types/database'
+import { ErrorAlert } from '@/components/ui/error-alert'
 import { DefectColumn } from './DefectColumn'
 import { DefectCreateModal } from './DefectCreateModal'
 
@@ -25,18 +26,22 @@ const COLUMNS: { status: DefectStatus; titleKey: string }[] = [
 
 async function fetchFilteredDefects(projectId: string, labelSlugs: string[]): Promise<Defect[] | null> {
   const res = await fetch(`/api/defects?projectId=${projectId}&labelSlugs=${labelSlugs.join(',')}`)
+  if (!res.ok) return null
   const json = await res.json()
   return (json.data as Defect[] | undefined) ?? null
 }
 
 export default function DefectBoard({ projectId }: DefectBoardProps) {
   const t = useTranslations('defects')
-  const { defects, isLoading, createDefect, updateStatus, updatePhotoIds } = useDefects({ projectId })
+  const ct = useTranslations('common')
+  const { defects, isLoading, error, refetch, createDefect, updateStatus, updatePhotoIds } =
+    useDefects({ projectId })
   const { canWrite } = useRole()
   const [showModal, setShowModal] = useState(false)
   const [expandedId, setExpandedId] = useState<string | null>(null)
   const { groups } = useLabels()
   const [labelFilters, setLabelFilters] = useState<Record<string, string[]>>({})
+  const [filterError, setFilterError] = useState(false)
   const [defectLabels, setDefectLabels] = useState<Record<string, Label[]>>({})
   const [filteredDefects, setFilteredDefects] = useState<Defect[] | null>(null)
   const [defectPhotos, setDefectPhotos] = useState<Record<string, Photo[]>>({})
@@ -172,14 +177,23 @@ export default function DefectBoard({ projectId }: DefectBoardProps) {
     let ignore = false
     const run = async () => {
       if (activeSlugs.length === 0) {
-        if (!ignore) setFilteredDefects(null)
+        if (!ignore) {
+          setFilteredDefects(null)
+          setFilterError(false)
+        }
         return
       }
       try {
         const data = await fetchFilteredDefects(projectId, activeSlugs)
-        if (!ignore) setFilteredDefects(data)
+        if (data === null) throw new Error('defect label filter failed')
+        if (!ignore) {
+          setFilteredDefects(data)
+          setFilterError(false)
+        }
       } catch {
-        if (!ignore) setFilteredDefects(null)
+        // Keep the previous list — falling back to all defects would silently
+        // ignore the worker's filter.
+        if (!ignore) setFilterError(true)
       }
     }
     void run()
@@ -190,6 +204,17 @@ export default function DefectBoard({ projectId }: DefectBoardProps) {
     return (
       <div className="flex items-center justify-center py-20">
         <div className="size-8 animate-spin rounded-full border-4 border-border border-t-foreground" />
+      </div>
+    )
+  }
+
+  if (error) {
+    return (
+      <div className="space-y-3">
+        <ErrorAlert>{error}</ErrorAlert>
+        <Button size="sm" variant="outline" onClick={() => void refetch()}>
+          {ct('retry')}
+        </Button>
       </div>
     )
   }
@@ -218,6 +243,15 @@ export default function DefectBoard({ projectId }: DefectBoardProps) {
       )}
 
       {/* Kanban columns */}
+      {filterError && (
+        <ErrorAlert
+          className="mb-4"
+          onDismiss={() => setFilterError(false)}
+          dismissLabel={ct('close')}
+        >
+          {ct('error')}
+        </ErrorAlert>
+      )}
       <div className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-4 xl:grid-cols-4 2xl:grid-cols-5">
         {COLUMNS.map((col) => {
           const colDefects = getColumnDefects(col.status)
