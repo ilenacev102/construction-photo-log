@@ -18,15 +18,15 @@ export async function GET() {
     if (isAdminUser(ctx)) {
       const { data, error } = await admin
         .from('projects')
-        .select('id, name, address, client_name, user_id, company_name, trade, timezone, created_at')
+        .select('id, name, address, client_name, user_id, trade, timezone, created_at')
         .order('created_at', { ascending: false })
       if (error) return errorResponse(error.message, 500)
       return successResponse(data ?? [])
     }
 
     const projectQuery = ctx
-      ? admin.from('projects').select('id, name, address, client_name, user_id, company_name, trade, timezone, created_at').in('user_id', ctx.companyUserIds)
-      : admin.from('projects').select('id, name, address, client_name, user_id, company_name, trade, timezone, created_at').eq('user_id', user.id)
+      ? admin.from('projects').select('id, name, address, client_name, user_id, trade, timezone, created_at').in('user_id', ctx.companyUserIds)
+      : admin.from('projects').select('id, name, address, client_name, user_id, trade, timezone, created_at').eq('user_id', user.id)
 
     const { data, error } = await projectQuery.order('created_at', { ascending: false })
     if (error) return errorResponse(error.message, 500)

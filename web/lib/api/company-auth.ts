@@ -1,10 +1,15 @@
 import type { SupabaseClient } from '@supabase/supabase-js'
 
-interface CompanyContext {
+export interface CompanyContext {
   companyName: string
   companyUserIds: string[]
   isAdmin: boolean
 }
+
+/** Roles allowed to manage a project (create/delete work orders, delete defects…). */
+export const MANAGER_ROLES = ['site_manager', 'admin'] as const
+/** Roles allowed to create/update defects — mirrors 20260731000001 RLS. */
+export const DEFECT_WRITE_ROLES = ['foreman', 'site_manager', 'admin'] as const
 
 export async function getCompanyContext(
   db: SupabaseClient,
@@ -184,6 +189,34 @@ export async function requireProjectMutate(
 }
 
 /**
+ * Role-scoped variant of requireProjectMutate: the caller must hold one of
+ * `roles` AND pass the company/ownership checks.
+ *
+ * RLS already enforces these role sets (e.g. 20260731000001 for defects), but
+ * the routes run on the service-role client, which bypasses RLS — so the same
+ * gate has to be re-applied here. Mirrors the policy, never widens it.
+ */
+export async function requireProjectRole(
+  db: SupabaseClient,
+  userId: string,
+  projectId: string,
+  roles: readonly string[],
+  message = 'Немате дозвола за оваа акција',
+): Promise<{ ctx: CompanyContext | null }> {
+  const { data: profile } = await db
+    .from('profiles')
+    .select('role')
+    .eq('id', userId)
+    .single()
+
+  if (!profile || !roles.includes(profile.role ?? '')) {
+    throw Object.assign(new Error(message), { status: 403 })
+  }
+
+  return requireProjectMutate(db, userId, projectId)
+}
+
+/**
  * Manager-gated variant of requireProjectMutate: same company/ownership
  * checks, PLUS the caller must hold a manager role (site_manager | admin).
  * Use for manager-only mutations (create/delete/cancel work orders) where
@@ -194,17 +227,13 @@ export async function requireProjectManager(
   userId: string,
   projectId: string,
 ): Promise<void> {
-  const { data: profile } = await db
-    .from('profiles')
-    .select('role')
-    .eq('id', userId)
-    .single()
-
-  if (!profile || !['site_manager', 'admin'].includes(profile.role ?? '')) {
-    throw Object.assign(new Error('Само раководител може да го направи ова'), { status: 403 })
-  }
-
-  await requireProjectMutate(db, userId, projectId)
+  await requireProjectRole(
+    db,
+    userId,
+    projectId,
+    MANAGER_ROLES,
+    'Само раководител може да го направи ова',
+  )
 }
 
 /** Non-throwing variant: true when the user may manage the project (manager role + access). */

@@ -47,6 +47,14 @@ jobs:
       - name: Security Audit (fail on critical)
         run: npm audit --audit-level=critical
 
+      - name: Production Build (next build)
+        run: npm run build
+        env:
+          NEXT_PUBLIC_SUPABASE_URL: https://example.supabase.co
+          NEXT_PUBLIC_SUPABASE_ANON_KEY: placeholder-anon-key
+          SUPABASE_SERVICE_ROLE_KEY: placeholder-service-key
+          NEXT_PUBLIC_SITE_URL: https://example.com
+
   e2e:
     name: E2E Smoke (Playwright)
     runs-on: ubuntu-latest

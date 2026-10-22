@@ -1,7 +1,11 @@
 <!-- BEGIN:nextjs-agent-rules -->
+
 # This is NOT the Next.js you know
 
-This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` before writing any code. Heed deprecation notices.
+This version has breaking changes — APIs, conventions, and file structure may all differ from your training data. Read the relevant guide in `node_modules/next/dist/docs/` (resolved from this file's directory; in monorepos the `next` package may not be visible from the repo root) before writing any code. Heed deprecation notices.
+
+This block is written and re-added by `next dev` — verify at `node_modules/next/dist/server/lib/generate-agent-files.js`. Removing it from a diff only re-creates the uncommitted change; committing it with your work keeps the tree clean.
+
 <!-- END:nextjs-agent-rules -->
 
 # Фото Градежен Дневник — AI Agent Guide
@@ -622,21 +626,14 @@ The store is an in-memory `Map` that self-cleans every 5 minutes, evicting entri
 
 ### Audit Logging
 
-`web/lib/audit.ts` defines a fire-and-forget audit trail. The `logAudit(params)` function (`audit.ts:53-70`) POSTs to `/api/audit-logs` (a server-side proxy that writes using the admin client, bypassing RLS). Failures are captured by the monitoring system and never thrown to the caller.
+`audit_logs` is a compliance trail written **server-side only**: routes insert through the service-role client (`app/api/users/route.ts:169` role changes, `app/api/permissions/route.ts:171` permission grants). Two independent layers stop forgery:
 
-The tracked actions (`audit.ts:3-24`) cover the full entity lifecycle:
+1. RLS denies every direct insert — `WITH CHECK (false)` (`20260801000003_fix_audit_forgery_and_permission_rpcs.sql`), so raw PostgREST cannot write rows.
+2. `GET /api/audit-logs` has **no POST handler**: a browser-supplied `action` would let any session invent history. There is no client-side `logAudit` helper.
 
-- **Project**: `project.created`, `project.updated`, `project.deleted`
-- **Photo**: `photo.uploaded`, `photo.updated`, `photo.deleted`, `photo.viewed`
-- **Daily Log**: `daily_log.created`, `daily_log.updated`
-- **Defect**: `defect.created`, `defect.updated`, `defect.resolved`
-- **Pin**: `pin.created`, `pin.updated`, `pin.deleted`
-- **Attendance**: `attendance.check_in`, `attendance.check_out`
-- **Report**: `report.generated`
-- **Auth**: `user.login`
-- **Profile**: `profile.updated`
+Reads are gated to `site_manager`/`admin` and scoped to the caller's company (`app/api/audit-logs/route.ts:47-52`).
 
-Entity types (`audit.ts:28-37`) map to eight categories: `project`, `photo`, `daily_log`, `defect`, `pin`, `attendance`, `report`, `profile`.
+Actions currently recorded: `user.<role changes>`, permission grants/revocations — plus the `action` vocabulary the audit viewer filters on.
 
 ### Security Headers
 
@@ -668,7 +665,7 @@ The security model works as follows:
 
 6. **Rate limiting**: In-memory sliding-window limiter returning 429 with standard headers. Protects against abuse but is not a substitute for authorization.
 
-7. **Audit trail**: All significant mutations are logged through `logAudit`, providing an append-only record of who did what and when.
+7. **Audit trail**: Privileged changes (roles, permissions) are written by the server into `audit_logs`; direct and client-side inserts are denied. Append-only record of who did what and when.
 
 8. **Security headers**: CSP, HSTS, X-Frame-Options, X-Content-Type-Options, and Referrer-Policy applied at the edge via Next.js middleware.
 

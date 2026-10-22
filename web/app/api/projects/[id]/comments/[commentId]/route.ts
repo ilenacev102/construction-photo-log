@@ -3,7 +3,7 @@ import { createAdminClient } from '@/lib/supabase/admin'
 import { requireAuth, apiErrorResponse } from '@/lib/api/auth-guard'
 import { checkRateLimit, rateLimitResponse, getClientIp } from '@/lib/api/rate-limit'
 import { errorResponse, successResponse } from '@/lib/api/errors'
-import { requireProjectAccess } from '@/lib/api/company-auth'
+import { requireProjectAccess, requireProjectManager } from '@/lib/api/company-auth'
 
 // DELETE /api/projects/[id]/comments/[commentId]
 export async function DELETE(
@@ -20,12 +20,13 @@ export async function DELETE(
 
     const { id: projectId, commentId } = await params
     const admin = createAdminClient()
-    await requireProjectAccess(admin, user.id, projectId)
 
-    // Fetch the comment to check ownership
+    // Fetch first: authorization runs on the comment's OWN project, which may
+    // differ from the one in the URL — otherwise a manager of project A could
+    // delete comments in project C.
     const { data: comment, error: fetchError } = await admin
       .from('comments')
-      .select('user_id')
+      .select('user_id, project_id')
       .eq('id', commentId)
       .single()
 
@@ -33,19 +34,15 @@ export async function DELETE(
       return errorResponse('Коментарот не е пронајден', 404)
     }
 
-    // Only the comment author or project admin can delete
-    if (comment.user_id !== user.id) {
-      // Check if user is admin/manager
-      const { data: member } = await admin
-        .from('project_members')
-        .select('role')
-        .eq('project_id', projectId)
-        .eq('user_id', user.id)
-        .single()
+    if (comment.project_id !== projectId) {
+      return errorResponse('Коментарот не е пронајден', 404)
+    }
 
-      if (!member || !['admin', 'site_manager'].includes(member.role)) {
-        return errorResponse('Немате дозвола да го избришете овој коментар', 403)
-      }
+    await requireProjectAccess(admin, user.id, projectId)
+
+    // Only the comment author or a project manager can delete
+    if (comment.user_id !== user.id) {
+      await requireProjectManager(admin, user.id, projectId)
     }
 
     // Delete associated mentions first

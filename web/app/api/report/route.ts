@@ -17,6 +17,12 @@ import { computeManifestHash, splitVerifiable } from '@/lib/evidence/manifest'
 
 export async function POST(request: NextRequest) {
   let tmpDir: string | null = null
+  let admin: ReturnType<typeof createAdminClient> | null = null
+  // The QR printed inside the PDF embeds the manifest id, so the row must be
+  // minted before generation — `completed` lets `finally` roll it back if any
+  // later step fails, so verify never sees a manifest for an unissued report.
+  let manifestId: string | null = null
+  let completed = false
   try {
     const { user } = await requireAuth()
 
@@ -30,11 +36,15 @@ export async function POST(request: NextRequest) {
     const { data: body, error: validationError } = await validateBody(request, generateReportSchema)
     if (validationError) return validationError
     const { projectId, photoIds, title, language } = body!
+    if (photoIds.length === 0) {
+      return errorResponse('Барем една слика е задолжителна', 400)
+    }
     if (photoIds.length > 100) {
       return errorResponse('Too many photos (max 100)')
     }
+    const requestedIds = [...new Set(photoIds)]
 
-    const admin = createAdminClient()
+    admin = createAdminClient()
     await requireProjectAccess(admin, user.id, projectId)
 
     // Fetch project metadata for the branded report header
@@ -60,9 +70,17 @@ export async function POST(request: NextRequest) {
       .from('photos')
       .select('id, project_id, image_url, content_hash, taken_at, latitude, longitude, note')
       .eq('project_id', projectId)
-      .in('id', photoIds)
+      .in('id', requestedIds)
 
     if (!photos || photos.length === 0) return errorResponse('Photos not found', 404)
+    // Every requested id must resolve: silently dropping the rest would mint a
+    // manifest over a different photo set than the caller asked to attest.
+    if (photos.length !== requestedIds.length) {
+      return errorResponse(
+        `${requestedIds.length - photos.length} слика(и) не припаѓаат на овој проект`,
+        400,
+      )
+    }
 
     // Evidence: split verifiable from legacy photos, hash the manifest,
     // persist it, and embed a QR verification page into the PDF.
@@ -85,8 +103,9 @@ export async function POST(request: NextRequest) {
     if (manifestError || !manifest) {
       return errorResponse('Failed to record report manifest', 500)
     }
+    manifestId = (manifest as { id: string }).id
     const origin = new URL(request.url).origin
-    const verifyUrl = `${origin}/verify/${(manifest as { id: string }).id}`
+    const verifyUrl = `${origin}/verify/${manifestId}`
 
     // Download images to temp dir (use signed URLs since bucket is private)
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'report-'))
@@ -104,6 +123,11 @@ export async function POST(request: NextRequest) {
       const ext = storagePath ? path.extname(storagePath) : '.jpg'
       const localPath = path.join(/*turbopackIgnore: true*/ tmpDir, `${photo.id}${ext}`)
       const response = await fetch(assertSafeStorageUrl(signedUrls[i]))
+      // A non-OK response would be written as-is and embedded in an attested
+      // report — fail the whole generation instead of shipping garbage.
+      if (!response.ok) {
+        return errorResponse(`Не успеа преземањето на слика ${i + 1}`, 500)
+      }
       const buffer = Buffer.from(await response.arrayBuffer())
       fs.writeFileSync(localPath, buffer)
       entries.push({
@@ -157,9 +181,10 @@ export async function POST(request: NextRequest) {
 
     const pdfUrl = await getSignedUrl(admin, `${process.env.NEXT_PUBLIC_SUPABASE_URL}/storage/v1/object/public/construction-photos/${pdfFileName}`, 86400)
 
+    completed = true
     return successResponse({
       pdf_url: pdfUrl,
-      manifest_id: (manifest as { id: string }).id,
+      manifest_id: manifestId,
       verify_url: verifyUrl,
       verifiable: verifiable.length,
       unverifiable: unverifiable.length,
@@ -168,5 +193,8 @@ export async function POST(request: NextRequest) {
     return apiErrorResponse(err)
   } finally {
     if (tmpDir) fs.rmSync(tmpDir, { recursive: true, force: true })
+    if (manifestId && !completed && admin) {
+      await admin.from('report_manifests').delete().eq('id', manifestId)
+    }
   }
 }

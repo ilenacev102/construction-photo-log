@@ -1,3 +1,10 @@
+/**
+ * Node environment: this test drives NextRequest.formData(), whose undici
+ * multipart parser only accepts Node-realm File objects — jsdom's FormData
+ * stringifies them and the route then rejects the upload with 400.
+ *
+ * @vitest-environment node
+ */
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { NextRequest } from 'next/server'
 import { POST } from '../upload/route'
